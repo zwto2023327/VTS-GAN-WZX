@@ -16,11 +16,11 @@ import argparse
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--Data_dir', type=str, default="Data dir of images and audio of GRID")
-    parser.add_argument('--Landmark', type=str, default="Data dir of GRID Landmark")
+    parser.add_argument('--Data_dir', type=str, default="/data/wzx/GRID/VTS-GAN-OUTPUT")
+    parser.add_argument('--Landmark', type=str, default="/data/wzx/VTS-GAN-WZX/data/GRID_LM")
     parser.add_argument('--FPS', type=int, default=25, help="25 for GRID")
     parser.add_argument('--reference', type=str, default='./Ref_face.txt')
-    parser.add_argument("--Output_dir", type=str, default='Output dir Ex) ./GRID_processed')
+    parser.add_argument("--Output_dir", type=str, default='/data/wzx/VTS-GAN-WZX/data/align_results')
     args = parser.parse_args()
     return args
 
@@ -67,7 +67,9 @@ class Preprocessing(Dataset):
 
     def __getitem__(self, idx):
         file_path = self.file_paths[idx]
-        ims = sorted(glob.glob(os.path.join(file_path.replace(args.Landmark, args.Data_dir)[:-4], '*.png')))
+        filep = os.path.join(file_path.replace(args.Landmark, args.Data_dir)[:-4], '*.png')
+        gg = glob.glob(filep)
+        ims = sorted(gg)
         frames = []
 
         for im in ims:

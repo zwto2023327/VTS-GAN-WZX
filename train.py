@@ -26,7 +26,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--grid', default="Data_dir")
     parser.add_argument("--checkpoint_dir", type=str, default='./data/checkpoints/GRID')
-    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--checkpoint", type=str, default='/data/wzx/VTS-GAN-WZX/data/checkpoints/overlap/Best_0001_stoi_0.666_estoi_0.456_pesq_1.498.ckpt')
     parser.add_argument("--batch_size", type=int, default=88)
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=0.0001)

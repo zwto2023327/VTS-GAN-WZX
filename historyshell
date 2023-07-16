@@ -1,0 +1,31 @@
+conda create -n VTS-GAN-WZX python=3.7
+conda activate VTS-GAN-WZX
+cd /data/wzx/VTS-GAN-WZX/
+python3.7 -m pip install torch==1.8.1+cu102 torchvision==0.9.1+cu102 torchaudio==0.8.1 -f https://download.pytorch.org/whl/torch_stable.html
+conda install mamba
+conda install ffmpeg
+conda install av
+conda install tensorboard
+conda install scikit-image=0.17.1
+python3.7 -m pip install opencv-python==3.4.9.33
+conda install pillow
+conda install librosa
+conda install pystoi
+conda install pesq
+conda install scipy
+python -m pip install Image
+conda install imutils
+conda install dlib
+conda install tqdm
+mkdir video && mv ./*.mpg ./video/ && mv Thumbs.db ./video/ && cd ../s4
+/usr/bin/nohup python Extract_frames.py --Grid_dir /data/wzx/GRID/VTS-GAN --Output_dir /data/wzx/GRID/VTS-GAN-OUTPUT >./alignlog0712 2>&1 &
+/usr/bin/nohup python Preprocess.py --Data_dir /data/wzx/GRID/VTS-GAN-OUTPUT --Landmark /data/wzx/VTS-GAN-WZX/data/GRID_LM --Output_dir /data/wzx/VTS-GAN-WZX/data/align_results >./log 2>&1 &
+/usr/bin/nohup python train.py  --grid /data/wzx/VTS-GAN-WZX/data/align_results --checkpoint_dir /data/wzx/VTS-GAN-WZX/data/checkpoints/overlap --batch_size 54 --epochs 500 --subject overlap --eval_step 720 --dataparallel  --gpu 0,1 >./trainoverlaplog 2>&1 &
+python train.py  --grid /data/wzx/VTS-GAN-WZX/data/align_results --checkpoint_dir /data/wzx/VTS-GAN-WZX/data/checkpoints/overlap/unseen --batch_size 22 —epochs 500 --subject unseen --eval_step 1000 --dataparallel  --gpu 0,1
+
+mkdir n030 && mkdir ./n029/video && mv ../news/download/n029_* ./n029/video/
+/usr/bin/nohup python Extract_frames_cn_cvs.py --Data_dir /data/wzx/CN-CVS/VTS-GAN-NEWS --Output_dir /data/wzx/CN-CVS/VTS-GAN-NEWS-OUTPUT >./alignlogcncvs0712 2>&1 &
+
+/data/wzx/VTS-GAN-WZX/data/checkpoints/overlap/Epoch_0004_stoi_0.617_estoi_0.370_pesq_1.392.ckpt
+tail -f /data/wzx/VTS-GAN-WZX/trainoverlaplog
+Nvidia-smi
