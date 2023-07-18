@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from src.models.resnet import BasicBlock
-
+from math import sqrt
 class ResBlk1D(nn.Module):
     def __init__(self, dim_in, dim_out, actv=nn.LeakyReLU(0.2),
                  normalize=False, downsample=False):
@@ -169,7 +169,7 @@ class AVAttention(nn.Module):
         out = out.view(B, T, F, -1).permute(0, 3, 2, 1)
 
         return out  #B,C,F,T
-
+#mel-spectrogram -> linear spectrogram
 class Postnet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -185,7 +185,7 @@ class Postnet(nn.Module):
         )
 
     def forward(self, x):
-        # x: B,1,80,T
+        # x: B,1,80,T 从数组的形状中删除单维度条目，即把shape中为1的维度去掉
         x = x.squeeze(1)    # B, 80, t
         x = self.postnet(x)     # B, 321, T
         x = x.unsqueeze(1)  # B, 1, 321, T
@@ -359,6 +359,194 @@ class sync_Discriminator(nn.Module):
             loss = -1/2 * (nce_va + nce_av)
 
         return loss
+def Conv1d(*args, **kwargs):
+    layer = nn.Conv1d(*args, **kwargs)
+    nn.init.kaiming_normal_(layer.weight)
+    return layer
+class AttrDict(dict):
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        self.__dict__ = self
+
+    def override(self, attrs):
+        if isinstance(attrs, dict):
+            self.__dict__.update(**attrs)
+        elif isinstance(attrs, (list, tuple, set)):
+            for attr in attrs:
+                self.override(attr)
+        elif attrs is not None:
+            raise NotImplementedError
+        return self
+def silu(x):
+    return x * torch.sigmoid(x)
+Linear = nn.Linear
+ConvTranspose2d = nn.ConvTranspose2d
+class SpectrogramUpsampler(nn.Module):
+    def __init__(self, n_mels):
+        super().__init__()
+        self.conv1 = ConvTranspose2d(1, 1, [3, 32], stride=[1, 16], padding=[1, 8])
+        self.conv2 = ConvTranspose2d(1, 1, [3, 32], stride=[1, 16], padding=[1, 8])
+
+    def forward(self, x):
+        x = torch.unsqueeze(x, 1)
+        x = self.conv1(x)
+        x = F.leaky_relu(x, 0.4)
+        x = self.conv2(x)
+        x = F.leaky_relu(x, 0.4)
+        x = torch.squeeze(x, 1)
+        return x
+class DiffusionEmbedding(nn.Module):
+    def __init__(self, max_steps):
+        super().__init__()
+        self.register_buffer('embedding', self._build_embedding(max_steps), persistent=False)
+        self.projection1 = Linear(128, 512)
+        self.projection2 = Linear(512, 512)
+
+    def forward(self, diffusion_step):
+        if diffusion_step.dtype in [torch.int32, torch.int64]:
+            x = self.embedding[diffusion_step]
+        else:
+            x = self._lerp_embedding(diffusion_step)
+        x = self.projection1(x)
+        x = silu(x)
+        x = self.projection2(x)
+        x = silu(x)
+        return x
+
+    def _lerp_embedding(self, t):
+        low_idx = torch.floor(t).long()
+        high_idx = torch.ceil(t).long()
+        low = self.embedding[low_idx]
+        high = self.embedding[high_idx]
+        return low + (high - low) * (t - low_idx)
+
+    def _build_embedding(self, max_steps):
+        steps = torch.arange(max_steps).unsqueeze(1)  # [T,1]
+        dims = torch.arange(64).unsqueeze(0)  # [1,64]
+        table = steps * 10.0 ** (dims * 4.0 / 63.0)  # [T,64]
+        table = torch.cat([torch.sin(table), torch.cos(table)], dim=1)
+        return table
+class ResidualBlock(nn.Module):
+    def __init__(self, n_mels, residual_channels, dilation, n_cond_global=None):
+        super().__init__()
+        self.dilated_conv = Conv1d(residual_channels, 2 * residual_channels, 3, padding=dilation, dilation=dilation)
+        self.diffusion_projection = Linear(512, residual_channels)
+        self.conditioner_projection = Conv1d(n_mels, 2 * residual_channels, 1)
+        if n_cond_global is not None:
+            self.conditioner_projection_global = Conv1d(n_cond_global, 2 * residual_channels, 1)
+        self.output_projection = Conv1d(residual_channels, 2 * residual_channels, 1)
+
+    def forward(self, x, conditioner, diffusion_step, conditioner_global=None):
+        diffusion_step = self.diffusion_projection(diffusion_step).unsqueeze(-1)
+        conditioner = self.conditioner_projection(conditioner)
+
+        y = x + diffusion_step
+        y = self.dilated_conv(y) + conditioner
+
+        if conditioner_global is not None:
+            y = y + self.conditioner_projection_global(conditioner_global)
+
+        gate, filter = torch.chunk(y, 2, dim=1)
+        y = torch.sigmoid(gate) * torch.tanh(filter)
+
+        y = self.output_projection(y)
+        residual, skip = torch.chunk(y, 2, dim=1)
+        return (x + residual) / sqrt(2.0), skip
+class PriorGrad(nn.Module):
+    def __init__(self):
+        super().__init__()
+        params = AttrDict(
+            # Training params
+            batch_size=16,
+            learning_rate=2e-4,
+            max_grad_norm=None,
+            use_l2loss=True,
+
+            # Data params
+            sample_rate=22050,
+            n_mels=80,
+            n_fft=1024,
+            hop_samples=256,
+            fmin=0,
+            fmax=8000,
+            crop_mel_frames=62,  # PriorGrad keeps the previous open-source implementation
+
+            # new data params for PriorGrad-vocoder
+            use_prior=True,
+            # optional parameters to additionally use the frame-level energy as the conditional input
+            # one can choose one of the two options as below. note that only one can be set to True.
+            condition_prior=False,  # whether to use energy prior as concatenated feature with mel. default is false
+            condition_prior_global=False,
+            # whether to use energy prior as global condition with projection. default is false
+            # minimum std that clips the prior std below std_min. ensures numerically stable training.
+            std_min=0.1,
+            # whether to clip max energy to certain value. Affects normalization of the energy.
+            # Lower value -> more data points assign to ~1 variance. so pushes latent space to higher variance regime
+            # if None, no override, uses computed stat
+            # for volume-normalized waveform with HiFi-GAN STFT, max energy of 4 gives reasonable range that clips outliers
+            max_energy_override=4.,
+
+            # Model params
+            residual_layers=30,
+            residual_channels=64,
+            dilation_cycle_length=10,
+            noise_schedule=np.linspace(1e-4, 0.05, 50).tolist(),  # [beta_start, beta_end, num_diffusion_step]
+            inference_noise_schedule=[0.0001, 0.001, 0.01, 0.05, 0.2, 0.5],  # T>=50
+            # inference_noise_schedule=[0.001, 0.01, 0.05, 0.2] # designed for for T=20
+        )
+        self.params = params
+        self.use_prior = params.use_prior
+        self.condition_prior = params.condition_prior
+        self.condition_prior_global = params.condition_prior_global
+        assert not (self.condition_prior and self.condition_prior_global),\
+          "use only one option for conditioning on the prior"
+        print("use_prior: {}".format(self.use_prior))
+        self.n_mels = params.n_mels
+        self.n_cond = None
+        print("condition_prior: {}".format(self.condition_prior))
+        if self.condition_prior:
+            self.n_mels = self.n_mels + 1
+            print("self.n_mels increased to {}".format(self.n_mels))
+        print("condition_prior_global: {}".format(self.condition_prior_global))
+        if self.condition_prior_global:
+            self.n_cond = 1
+
+        self.input_projection = Conv1d(1, params.residual_channels, 1)
+        self.diffusion_embedding = DiffusionEmbedding(len(params.noise_schedule))
+        self.spectrogram_upsampler = SpectrogramUpsampler(self.n_mels)
+        if self.condition_prior_global:
+            self.global_condition_upsampler = SpectrogramUpsampler(self.n_cond)
+        self.residual_layers = nn.ModuleList([
+            ResidualBlock(self.n_mels, params.residual_channels, 2 ** (i % params.dilation_cycle_length),
+                          n_cond_global=self.n_cond)
+            for i in range(params.residual_layers)
+        ])
+        self.skip_projection = Conv1d(params.residual_channels, params.residual_channels, 1)
+        self.output_projection = Conv1d(params.residual_channels, 1, 1)
+        nn.init.zeros_(self.output_projection.weight)
+
+        print('num param: {}'.format(sum(p.numel() for p in self.parameters() if p.requires_grad)))
+
+    def forward(self, audio, spectrogram, diffusion_step, global_cond=None):
+        x = audio.unsqueeze(1)
+        x = self.input_projection(x)
+        x = F.relu(x)
+
+        diffusion_step = self.diffusion_embedding(diffusion_step)
+        spectrogram = self.spectrogram_upsampler(spectrogram)
+        if global_cond is not None:
+            global_cond = self.global_condition_upsampler(global_cond)
+
+        skip = []
+        for layer in self.residual_layers:
+            x, skip_connection = layer(x, spectrogram, diffusion_step, global_cond)
+            skip.append(skip_connection)
+
+        x = torch.sum(torch.stack(skip), dim=0) / sqrt(len(self.residual_layers))
+        x = self.skip_projection(x)
+        x = F.relu(x)
+        x = self.output_projection(x)
+        return x
 
 def gan_loss(inputs, label=None):
     # non-saturating loss with R1 regularization

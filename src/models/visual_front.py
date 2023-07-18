@@ -22,6 +22,7 @@ class Visual_front(nn.Module):
 
     def forward(self, x):
         #B,C,S,H,W
+        #local visual encoder
         x = self.frontend(x)    #B,C,T,H,W
         B, C, T, H, W = x.size()
         x = x.transpose(1, 2).contiguous().view(B*T, C, H, W)
@@ -29,7 +30,7 @@ class Visual_front(nn.Module):
         x = self.dropout(x)
         x = x.view(B, T, -1)
         phons = x.permute(1, 0, 2).contiguous()  # S,B,512
-
+        #global visual encoder
         self.sentence_encoder.flatten_parameters()
         sentence, _ = self.sentence_encoder(phons)
         sentence = self.fc(sentence).permute(1, 2, 0).contiguous()   # B,512,T

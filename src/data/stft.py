@@ -43,15 +43,15 @@ class STFT(torch.nn.Module):
         self.window = window
         self.forward_transform = None
         scale = self.filter_length / self.hop_length
-        fourier_basis = np.fft.fft(np.eye(self.filter_length))
+        fourier_basis = np.fft.fft(np.eye(self.filter_length))#快速傅立叶变换 np.eye：生成对角阵 形成one-hot编码
 
         cutoff = int((self.filter_length / 2 + 1))
         fourier_basis = np.vstack([np.real(fourier_basis[:cutoff, :]),
-                                   np.imag(fourier_basis[:cutoff, :])])
+                                   np.imag(fourier_basis[:cutoff, :])])#按垂直方向（行顺序）堆叠数组构成一个新的数组 堆叠的数组需要具有相同的维度
 
         forward_basis = torch.FloatTensor(fourier_basis[:, None, :])
         inverse_basis = torch.FloatTensor(
-            np.linalg.pinv(scale * fourier_basis).T[:, None, :])
+            np.linalg.pinv(scale * fourier_basis).T[:, None, :])#求伪逆矩阵
 
         if window is not None:
             assert(filter_length >= win_length)

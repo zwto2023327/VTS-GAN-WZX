@@ -20,15 +20,13 @@ from pystoi import stoi
 from matplotlib import pyplot as plt
 import copy
 import librosa
-
-
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--grid', default="Data_dir")
-    parser.add_argument("--checkpoint_dir", type=str, default='./data/checkpoints/GRID')
-    parser.add_argument("--checkpoint", type=str, default='/data/wzx/VTS-GAN-WZX/data/checkpoints/overlap/Best_0001_stoi_0.666_estoi_0.456_pesq_1.498.ckpt')
-    parser.add_argument("--batch_size", type=int, default=88)
-    parser.add_argument("--epochs", type=int, default=1000)
+    parser.add_argument('--grid', default="/data/wzx/VTS-GAN-WZX/data/align_results")
+    parser.add_argument("--checkpoint_dir", type=str, default='/data/wzx/VTS-GAN-WZX/data/checkpoints/overlap')
+    parser.add_argument("--checkpoint", type=str, default='/data/wzx/VTS-GAN-WZX/data/checkpoints/overlap/Best_0030_stoi_0.734_estoi_0.581_pesq_1.774.ckpt')
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--weight_decay", type=float, default=0.00001)
     parser.add_argument("--workers", type=int, default=6)
@@ -44,16 +42,24 @@ def parse_args():
     parser.add_argument("--max_timesteps", type=int, default=75)
     parser.add_argument("--temp", type=float, default=1.0)
 
-    parser.add_argument("--dataparallel", default=False, action='store_true')
-    parser.add_argument("--gpu", type=str, default='0,1,2,3')
+    parser.add_argument("--dataparallel", default=True, action='store_true')
+    parser.add_argument("--gpu", type=str, default='0')
     args = parser.parse_args()
     return args
 
 def train_net(args):
+    #torch.backends.cudnn.deterministic 将这个 flag 置为 True 的话，每次返回的卷积算法将是确定的，即默认算法。如果配合上设置 Torch 的随机种子为固定值的话，应该可以保证每次运行网络的时候相同输入的输出是固定的
     torch.backends.cudnn.deterministic = False
+    #如果我们的网络模型一直变的话，不能设置cudnn.benchmark=True。因为寻找最优卷积算法需要花费时间
     torch.backends.cudnn.benchmark = True
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    '''
+    设置 CPU 生成随机数的 种子 ，方便下次复现实验结果。
+    为 CPU 设置 种子 用于生成随机数，以使得结果是确定的。   
+    当你设置一个随机种子时，接下来的随机算法生成数根据当前的随机种子按照一定规律生成。
+    随机种子作用域是在设置时到下一次设置时。要想重复实验结果，设置同样随机种子即可。
+    '''
+    torch.manual_seed(args.seed)#单gpu或cpu
+    torch.cuda.manual_seed_all(args.seed)#所有gpu
     random.seed(args.seed)
     os.environ['OMP_NUM_THREADS'] = '2'
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -67,13 +73,13 @@ def train_net(args):
         augmentations=args.augmentations,
     )
 
-    v_front = Visual_front(in_channels=1)
+    v_front = Visual_front(in_channels=1)#visual encoder
     gen = Decoder()
     post = Postnet()
     dis1 = Discriminator(phase='1')
     dis2 = Discriminator(phase='2')
     dis3 = Discriminator(phase='3')
-    s_dis = sync_Discriminator(temp=args.temp)
+    s_dis = sync_Discriminator(temp=args.temp)#audio encoder
 
     g_params = [{'params': v_front.parameters()}, {'params': gen.parameters()}, {'params': post.parameters()}]
     d_params = [{'params': dis1.parameters()}, {'params': dis2.parameters()}, {'params': dis3.parameters()},
@@ -154,15 +160,15 @@ def train(v_front, gen, post, dis1, dis2, dis3, s_dis, train_data, epochs, optim
     step = 0
     for epoch in range(args.start_epoch, epochs):
         loss_list = []
-        print(f"Epoch [{epoch}/{epochs}]")
+        #print(f"Epoch [{epoch}/{epochs}]")
         prev_time = time.time()
         for i, batch in enumerate(dataloader):
             step += 1
             if i % 100 == 0:
                 iter_time = (time.time() - prev_time) / 100
                 prev_time = time.time()
-                print("******** Training [%d / %d] : %d / %d, Iter Time : %.3f sec, Learning Rate of %f ********" % (
-                    epoch, epochs, (i + 1) * batch_size, samples, iter_time, g_optimizer.param_groups[0]['lr']))
+                '''print("******** Training [%d / %d] : %d / %d, Iter Time : %.3f sec, Learning Rate of %f ********" % (
+                    epoch, epochs, (i + 1) * batch_size, samples, iter_time, g_optimizer.param_groups[0]['lr']))'''
             mel, spec, vid, vid_len, wav_tr, mel_len = batch
 
             v_front.zero_grad(), gen.zero_grad(), post.zero_grad()
@@ -253,7 +259,7 @@ def train(v_front, gen, post, dis1, dis2, dis3, s_dis, train_data, epochs, optim
                 writer.add_scalar('train/d_sync_loss', sync_loss.cpu(), step)
                 writer.add_scalar('lr/learning_rate', g_optimizer.param_groups[0]['lr'], step)
                 if i % 100 == 0:
-                    print(f'######## Step(Epoch): {step}({epoch}), Generator Loss: {gen_loss.cpu().item()} #########')
+                   # print(f'######## Step(Epoch): {step}({epoch}), Generator Loss: {gen_loss.cpu().item()} #########')
                     writer.add_image('train_mel/g1',
                                      train_data.plot_spectrogram_to_numpy(g1.cpu().detach().numpy()[0]), step)
                     writer.add_image('train_mel/g2',
@@ -280,8 +286,8 @@ def train(v_front, gen, post, dis1, dis2, dis3, s_dis, train_data, epochs, optim
             if step % args.eval_step == 0:
                 logs = validate(v_front, gen, post, epoch=epoch, writer=writer, fast_validate=True)
 
-                print('VAL_stoi: ', logs[1])
-                print('Saving checkpoint: %d' % epoch)
+                #print('VAL_stoi: ', logs[1])
+                #print('Saving checkpoint: %d' % epoch)
                 if args.dataparallel:
                     v_state_dict = v_front.module.state_dict()
                     gen_state_dict = gen.module.state_dict()
@@ -385,7 +391,7 @@ def validate(v_front, gen, post, fast_validate=False, epoch=0, writer=None):
 
             loss = criterion(g3, mel.cuda()).cpu().item()
             val_loss.append(loss)
-
+            #生成wav
             wav_pred = val_data.inverse_mel(g3[:, :, :, :mel_len[0]].detach(), stft)  # B, 1, 80, T
             wav_spec = val_data.inverse_spec(gs[:, :, :, :mel_len[0]].detach(), stft)
             wav_gt = val_data.inverse_mel(mel[:, :, :, :mel_len[0]].cuda().detach(), stft)
